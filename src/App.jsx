@@ -3,7 +3,7 @@ import { RefreshCw, AlertCircle, Plus, Wallet, TrendingDown, PieChart as PieIcon
 import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
 
 // PASTE YOUR APPS SCRIPT /exec URL HERE
-const DATA_URL = "REPLACE_ME";
+const DATA_URL = "https://script.google.com/macros/s/AKfycbzC4jsXe7Zo_ga_soFnCWMVZF0wFCw1kbwbc0tmBxWqheX1yrTs9PvjuUtrI0HHVfQy/exec";
 
 const C = {
   ink: "#1c2333", paper: "#f4f6f8", card: "#ffffff", line: "#e2e6ec",
