@@ -1,19 +1,22 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
-import { RefreshCw, AlertCircle, Plus, Wallet, TrendingDown, PieChart as PieIcon, Receipt, X } from "lucide-react";
-import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { RefreshCw, AlertCircle, Plus, X, Undo2, PieChart as PieIcon, BookOpen } from "lucide-react";
+import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 
 // Live endpoint: Money Spends 2026 sheet (Budget + Spends tabs)
 const DATA_URL = "https://script.google.com/macros/s/AKfycbzC4jsXe7Zo_ga_soFnCWMVZF0wFCw1kbwbc0tmBxWqheX1yrTs9PvjuUtrI0HHVfQy/exec";
 
-const C = {
-  ink: "#1c2333", paper: "#f4f6f8", card: "#ffffff", line: "#e2e6ec",
-  muted: "#78808f",
-  teal: "#0e7c7b", green: "#2e7d51", greenBg: "#e4f2ea",
-  amber: "#b8860b", amberBg: "#fbf0d9",
-  red: "#c0392b", redBg: "#fbeae8",
-  navy: "#1f2d4a",
+/* Palette — grounded in banknote ink & warm paper */
+const T = {
+  paper: "#FAF8F3", card: "#FFFFFF", line: "#E7E2D6",
+  ink: "#182420", muted: "#8A8578",
+  green: "#1E6B4E", mint: "#DEF0E5", mintDeep: "#BCE0CB",
+  gold: "#C98F1A", goldTint: "#F7ECD4",
+  red: "#C43D2E", redTint: "#F8E4E0",
 };
-const PALETTE = ["#0e7c7b", "#2e7d51", "#b8860b", "#c0392b", "#5b4b8a", "#1f6f8b", "#a0522d", "#556b2f", "#8b3a62"];
+/* Bucket identity palette — distinct hues that sit well on warm paper.
+   Order-stable: bucket N gets colour N unless the sheet's Color column overrides. */
+const BUCKET_COLORS = ["#1E6B4E", "#3E7CB1", "#C98F1A", "#8A5A83", "#B5651D", "#2E5E6B", "#7A9E3B", "#A34A5E", "#5F7161"];
+const tint = (hex, a = "26") => hex + a; // hex + alpha ≈ 15% wash
 
 const post = (payload) =>
   fetch(DATA_URL, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify(payload) });
@@ -22,19 +25,27 @@ const money = (n) => "₹" + Number(n || 0).toLocaleString("en-IN");
 const fmtDate = (v) => {
   const s = String(v == null ? "" : v).trim();
   if (!s) return "";
-  if (s.includes("T")) return s.split("T")[0];
-  return s;
+  return s.includes("T") ? s.split("T")[0] : s;
 };
+const niceDate = (v) => {
+  const s = fmtDate(v);
+  const d = new Date(s + "T00:00:00");
+  if (isNaN(d.getTime())) return s;
+  return d.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+};
+
+const CHIPS = [50, 100, 200, 500];
 
 export default function App() {
   const [budgetRows, setBudgetRows] = useState([]);
   const [spendRows, setSpendRows] = useState([]);
   const [status, setStatus] = useState("loading");
-  const [updated, setUpdated] = useState(null);
-  const [showForm, setShowForm] = useState(false);
-  const [fBucket, setFBucket] = useState("");
+  const [activeBucket, setActiveBucket] = useState(null); // card in log mode
   const [fDesc, setFDesc] = useState("");
   const [fAmount, setFAmount] = useState("");
+  const [toast, setToast] = useState(null); // {text, spend}
+  const amountRef = useRef(null);
+  const toastTimer = useRef(null);
 
   const load = useCallback(async () => {
     setStatus("loading");
@@ -47,44 +58,46 @@ export default function App() {
         .filter((r) => r.some((c) => c.trim() !== ""));
       setBudgetRows(clean(json.budget));
       setSpendRows(clean(json.spends));
-      setUpdated(new Date());
       setStatus("ok");
     } catch (e) { setStatus("error"); }
   }, []);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
-    const id = setInterval(() => { if (!showForm) load(); }, 60000);
+    const id = setInterval(() => { if (!activeBucket) load(); }, 60000);
     return () => clearInterval(id);
-  }, [load, showForm]);
+  }, [load, activeBucket]);
 
-  // parse budget: Bucket | Amount | Where
+  /* ── parse ─────────────────────────────────────────── */
   const buckets = useMemo(() => {
     if (!budgetRows.length) return [];
     let hi = budgetRows.findIndex((r) => {
-      const cells = r.map((c) => String(c).toLowerCase().trim());
-      return cells.includes("bucket") && cells.includes("amount");
+      const c = r.map((x) => String(x).toLowerCase().trim());
+      return c.includes("bucket") && c.includes("amount");
     });
     if (hi === -1) hi = 0;
-    const headers = budgetRows[hi].map((h) => String(h).trim().toLowerCase());
-    const bi = headers.indexOf("bucket"), ai = headers.indexOf("amount"), wi = headers.indexOf("where");
-    return budgetRows.slice(hi + 1).map((r) => ({
-      bucket: String(r[bi] || "").trim(),
-      amount: Number(String(r[ai] || "0").replace(/[^0-9.-]/g, "")) || 0,
-      where: wi >= 0 ? String(r[wi] || "").trim() : "",
-    })).filter((b) => b.bucket && b.bucket.toLowerCase() !== "total");
+    const h = budgetRows[hi].map((x) => String(x).trim().toLowerCase());
+    const bi = h.indexOf("bucket"), ai = h.indexOf("amount"), wi = h.indexOf("where"), ci = h.indexOf("color");
+    return budgetRows.slice(hi + 1).map((r, idx) => {
+      const custom = ci >= 0 ? String(r[ci] || "").trim() : "";
+      return {
+        bucket: String(r[bi] || "").trim(),
+        amount: Number(String(r[ai] || "0").replace(/[^0-9.-]/g, "")) || 0,
+        where: wi >= 0 ? String(r[wi] || "").trim() : "",
+        color: /^#[0-9a-fA-F]{6}$/.test(custom) ? custom : BUCKET_COLORS[idx % BUCKET_COLORS.length],
+      };
+    }).filter((b) => b.bucket && b.bucket.toLowerCase() !== "total");
   }, [budgetRows]);
 
-  // parse spends: Date | Bucket | Description | Amount
   const spends = useMemo(() => {
     if (!spendRows.length) return [];
     let hi = spendRows.findIndex((r) => {
-      const cells = r.map((c) => String(c).toLowerCase().trim());
-      return cells.includes("bucket") && cells.includes("amount");
+      const c = r.map((x) => String(x).toLowerCase().trim());
+      return c.includes("bucket") && c.includes("amount");
     });
     if (hi === -1) hi = 0;
-    const headers = spendRows[hi].map((h) => String(h).trim().toLowerCase());
-    const di = headers.indexOf("date"), bi = headers.indexOf("bucket"), si = headers.indexOf("description"), ai = headers.indexOf("amount");
+    const h = spendRows[hi].map((x) => String(x).trim().toLowerCase());
+    const di = h.indexOf("date"), bi = h.indexOf("bucket"), si = h.indexOf("description"), ai = h.indexOf("amount");
     return spendRows.slice(hi + 1).map((r) => ({
       date: fmtDate(r[di]),
       bucket: String(r[bi] || "").trim(),
@@ -93,10 +106,10 @@ export default function App() {
     })).filter((s) => s.bucket || s.amount);
   }, [spendRows]);
 
-  // derive per-bucket spent / left
   const rows = useMemo(() => buckets.map((b) => {
     const spent = spends.filter((s) => s.bucket === b.bucket).reduce((n, s) => n + s.amount, 0);
-    return { ...b, spent, left: b.amount - spent, pct: b.amount ? Math.min(100, (spent / b.amount) * 100) : 0 };
+    const left = b.amount - spent;
+    return { ...b, spent, left, leftPct: b.amount ? Math.max(0, Math.min(100, (left / b.amount) * 100)) : 0 };
   }), [buckets, spends]);
 
   const totals = useMemo(() => {
@@ -105,27 +118,51 @@ export default function App() {
     return { allocated, spent, left: allocated - spent, pct: allocated ? (spent / allocated) * 100 : 0 };
   }, [rows]);
 
-  const pieData = rows.filter((r) => r.spent > 0).map((r) => ({ name: r.bucket, value: r.spent }));
-  const barData = rows.map((r) => ({ name: r.bucket.length > 12 ? r.bucket.slice(0, 11) + "…" : r.bucket, Spent: r.spent, Left: Math.max(0, r.left) }));
-  const recent = [...spends].reverse().slice(0, 8);
+  const pieData = rows.filter((r) => r.spent > 0).map((r) => ({ name: r.bucket, value: r.spent, color: r.color }));
+  const recent = [...spends].reverse().slice(0, 9);
+  const colorOf = useMemo(() => {
+    const m = {};
+    rows.forEach((r) => { m[r.bucket] = r.color; });
+    return (bucket) => m[bucket] || T.muted;
+  }, [rows]);
 
-  const openLogFor = (bucket) => {
-    setFBucket(bucket);
-    setShowForm(true);
-    setTimeout(() => {
-      const el = document.getElementById("spend-desc");
-      if (el) { el.focus(); el.scrollIntoView({ behavior: "smooth", block: "center" }); }
-    }, 60);
+  /* ── actions ───────────────────────────────────────── */
+  const openCard = (bucket) => {
+    setActiveBucket(bucket);
+    setFDesc(""); setFAmount("");
+    setTimeout(() => amountRef.current?.focus(), 60);
+  };
+  const closeCard = () => { setActiveBucket(null); setFDesc(""); setFAmount(""); };
+
+  const showToast = (text, spend) => {
+    clearTimeout(toastTimer.current);
+    setToast({ text, spend });
+    toastTimer.current = setTimeout(() => setToast(null), 6000);
   };
 
-  const addSpend = async () => {
+  const logSpend = async () => {
     const amt = Number(fAmount);
-    if (!fBucket || !amt) return;
+    if (!activeBucket || !amt) return;
     const today = new Date().toISOString().split("T")[0];
-    const desc = fDesc.trim();
-    setSpendRows((r) => [...r, [today, fBucket, desc, String(amt)]]);
-    setFDesc(""); setFAmount(""); setShowForm(false);
-    try { await post({ action: "addSpend", date: today, bucket: fBucket, description: desc, amount: amt }); } catch {}
+    const spend = { date: today, bucket: activeBucket, description: fDesc.trim(), amount: amt };
+    setSpendRows((r) => [...r, [today, spend.bucket, spend.description, String(amt)]]);
+    closeCard();
+    showToast("Logged " + money(amt) + " to " + spend.bucket, spend);
+    try { await post({ action: "addSpend", ...spend }); } catch {}
+  };
+
+  const undoSpend = async () => {
+    const s = toast?.spend;
+    if (!s) return;
+    setToast(null);
+    setSpendRows((r) => {
+      const idx = [...r].reverse().findIndex((row) =>
+        String(row[1]).trim() === s.bucket && String(row[2]).trim() === s.description && Number(row[3]) === s.amount);
+      if (idx === -1) return r;
+      const real = r.length - 1 - idx;
+      return r.filter((_, i) => i !== real);
+    });
+    try { await post({ action: "deleteSpend", bucket: s.bucket, description: s.description, amount: s.amount }); } catch {}
   };
 
   const deleteSpend = async (s) => {
@@ -134,204 +171,219 @@ export default function App() {
     try { await post({ action: "deleteSpend", bucket: s.bucket, description: s.description, amount: s.amount }); } catch {}
   };
 
-  const barColor = (r) => r.left < 0 ? C.red : r.pct > 80 ? C.amber : C.green;
+  const chip = (v) => setFAmount(String((Number(fAmount) || 0) + v));
+
+  /* fill colour by how empty the envelope is */
+  /* identity colour carries the fill; health gets a badge */
+  const fillTone = (r) => ({
+    fill: r.left < 0 ? T.redTint : tint(r.color),
+    badge: r.left < 0 ? { text: "over", bg: T.redTint, fg: T.red }
+      : r.leftPct <= 25 ? { text: "low", bg: T.goldTint, fg: T.gold }
+      : null,
+  });
 
   return (
-    <div style={{ background: C.paper, minHeight: "100vh", fontFamily: "'Inter', system-ui, sans-serif", color: C.ink }}>
+    <div style={{ background: T.paper, minHeight: "100vh", color: T.ink, fontFamily: "'Work Sans', system-ui, sans-serif" }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fraunces:opsz,wght@9..144,600;9..144,700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Work+Sans:wght@400;500;600;700&display=swap');
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { background: ${C.paper}; }
-        .display { font-family: 'Fraunces', serif; }
-        .panel { background:${C.card}; border:1px solid ${C.line}; border-radius:14px; padding:18px; }
-        .spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
-        .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
-        .cardgrid { display:grid; grid-template-columns:repeat(3, 1fr); gap:14px; }
-        .bucketcard { transition: box-shadow .15s, transform .15s, border-color .15s; }
-        .bucketcard:hover { box-shadow:0 6px 18px rgba(31,45,74,.10); transform:translateY(-2px); border-color:#c9d2dd!important; }
-        .cardhint { opacity:0; transition:opacity .15s; }
-        .bucketcard:hover .cardhint { opacity:1; }
-        input,select { font-family:inherit; }
-        @media (max-width:900px){ .cardgrid{ grid-template-columns:repeat(2, 1fr); } }
-        @media (max-width:800px){ .grid2{ grid-template-columns:1fr; } .wrap{ padding:16px 12px 60px!important; } .hdr{ flex-direction:column; align-items:flex-start!important; gap:14px!important; } }
-        @media (max-width:560px){ .cardgrid{ grid-template-columns:1fr; } .cardhint{ opacity:1; } }
+        body { background: ${T.paper}; }
+        .serif { font-family: 'Instrument Serif', serif; }
+        .num { font-variant-numeric: tabular-nums; }
+        .wrap { max-width: 1020px; margin: 0 auto; padding: 34px 20px 90px; }
+        .cardgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+        .grid2 { display: grid; grid-template-columns: 5fr 6fr; gap: 14px; }
+        .panel { background: ${T.card}; border: 1px solid ${T.line}; border-radius: 16px; padding: 20px; }
+        .env { position: relative; overflow: hidden; background: ${T.card}; border: 1px solid ${T.line};
+               border-radius: 16px; padding: 18px; cursor: pointer; min-height: 178px;
+               display: flex; flex-direction: column; justify-content: space-between; }
+        .env:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid ${T.green}; outline-offset: 2px; }
+        .chipbtn { border: 1px solid ${T.line}; background: ${T.paper}; border-radius: 999px; padding: 5px 12px;
+                   font-size: 12px; font-weight: 600; cursor: pointer; color: ${T.ink}; }
+        .chipbtn:hover { border-color: ${T.green}; color: ${T.green}; }
+        .ghost { border: 1px solid ${T.line}; background: transparent; border-radius: 10px; padding: 8px 10px;
+                 cursor: pointer; color: ${T.muted}; display: inline-flex; align-items: center; }
+        .primary { border: none; background: ${T.green}; color: #fff; border-radius: 10px; padding: 9px 18px;
+                   font-size: 13px; font-weight: 700; cursor: pointer; font-family: inherit; }
+        input { font-family: inherit; }
+        .spin { animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @media (prefers-reduced-motion: no-preference) {
+          .env { transition: transform .16s ease, box-shadow .16s ease; }
+          .env:hover { transform: translateY(-2px); box-shadow: 0 8px 22px rgba(24,36,32,.08); }
+          .envfill { transition: height .45s cubic-bezier(.2,.7,.3,1); }
+          .toastin { animation: rise .22s ease; }
+          @keyframes rise { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
+        }
+        @media (max-width: 880px) { .cardgrid { grid-template-columns: repeat(2, 1fr); } .grid2 { grid-template-columns: 1fr; } }
+        @media (max-width: 540px) { .cardgrid { grid-template-columns: 1fr; } .wrap { padding: 22px 14px 90px; } }
       `}</style>
 
-      <div className="wrap" style={{ maxWidth: 1060, margin: "0 auto", padding: "26px 20px 80px" }}>
-        {/* header */}
-        <div style={{ background: C.navy, borderRadius: 16, padding: "20px 22px", marginBottom: 16 }}>
-          <div className="hdr" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 16 }}>
-            <div>
-              <h1 className="display" style={{ fontSize: 26, color: "#fff", lineHeight: 1 }}>Money Spends 2026</h1>
-              <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".1em", color: "#98a4bd", textTransform: "uppercase", marginTop: 5 }}>Bucket budget · rolls over monthly</div>
+      <div className="wrap">
+        {/* ── masthead: the one number that matters ── */}
+        <header style={{ marginBottom: 30 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: ".14em", textTransform: "uppercase", color: T.muted }}>
+              Money Spends 2026
             </div>
-            <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
-              <Stat label="Allocated" value={money(totals.allocated)} color="#fff" />
-              <Stat label="Spent" value={money(totals.spent)} color="#f2b544" />
-              <Stat label="Left" value={money(totals.left)} color={totals.left < 0 ? "#ff8a80" : "#7ddba3"} />
-              <button onClick={load} style={{ border: "1px solid rgba(255,255,255,.25)", background: "rgba(255,255,255,.12)", borderRadius: 10, padding: 9, cursor: "pointer", color: "#fff", display: "inline-flex" }}>
-                <RefreshCw size={15} className={status === "loading" ? "spin" : ""} />
-              </button>
-            </div>
-          </div>
-          {/* overall bar */}
-          <div style={{ marginTop: 16, background: "rgba(255,255,255,.15)", borderRadius: 999, height: 8, overflow: "hidden" }}>
-            <div style={{ width: Math.min(100, totals.pct) + "%", height: "100%", background: totals.pct > 90 ? "#ff8a80" : "#7ddba3", borderRadius: 999 }} />
-          </div>
-          <div style={{ fontSize: 11, color: "#98a4bd", marginTop: 6 }}>{totals.pct.toFixed(0)}% of budget used</div>
-        </div>
-
-        {status === "error" && (
-          <Banner icon={<AlertCircle size={16} />}>
-            Couldn't load. Check the Apps Script <b>/exec</b> URL returns JSON and access is <b>Anyone</b>.
-          </Banner>
-        )}
-
-        {/* add spend */}
-        <div className="panel" style={{ marginBottom: 16 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <Label icon={<Receipt size={15} color={C.teal} />} text="Log a spend" color={C.teal} />
-            <button onClick={() => setShowForm((s) => !s)} style={{ border: `1px solid ${C.teal}`, color: C.teal, background: "#fff", borderRadius: 8, padding: "5px 11px", fontSize: 12, fontWeight: 700, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5 }}>
-              <Plus size={13} /> Add
+            <button className="ghost" onClick={load} aria-label="Refresh">
+              <RefreshCw size={15} className={status === "loading" ? "spin" : ""} />
             </button>
           </div>
-          {showForm && (
-            <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-              <select value={fBucket} onChange={(e) => setFBucket(e.target.value)} style={{ border: `1px solid ${C.line}`, borderRadius: 8, padding: "9px 10px", fontSize: 13, minWidth: 160 }}>
-                <option value="">Which bucket…</option>
-                {rows.map((r, i) => <option key={i} value={r.bucket}>{r.bucket}</option>)}
-              </select>
-              <input id="spend-desc" value={fDesc} onChange={(e) => setFDesc(e.target.value)} placeholder="What was it?" style={{ border: `1px solid ${C.line}`, borderRadius: 8, padding: "9px 10px", fontSize: 13, flex: 1, minWidth: 140 }} />
-              <input value={fAmount} onChange={(e) => setFAmount(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addSpend()} placeholder="Amount" inputMode="numeric" style={{ border: `1px solid ${C.line}`, borderRadius: 8, padding: "9px 10px", fontSize: 13, width: 110 }} />
-              <button onClick={addSpend} style={{ background: C.teal, color: "#fff", border: "none", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Log</button>
-            </div>
-          )}
-        </div>
-
-        {/* bucket cards */}
-        <div style={{ marginBottom: 16 }}>
-          <div style={{ marginBottom: 12 }}>
-            <Label icon={<Wallet size={15} color={C.green} />} text="Buckets" color={C.green} count={rows.length} />
+          <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginTop: 10 }}>
+            <span className="serif num" style={{ fontSize: 64, lineHeight: 1, color: totals.left < 0 ? T.red : T.ink }}>
+              {money(totals.left)}
+            </span>
+            <span className="serif" style={{ fontSize: 26, color: T.muted, fontStyle: "italic" }}>left to spend</span>
           </div>
-          {rows.length === 0 ? (
-            <div className="panel" style={{ fontSize: 13, color: C.muted }}>No buckets found. Check the Budget tab has Bucket / Amount headers on row 1.</div>
-          ) : (
-            <div className="cardgrid">
-              {rows.map((r, i) => {
-                const col = barColor(r);
-                return (
-                  <div key={i} className="bucketcard" onClick={() => openLogFor(r.bucket)}
-                    style={{ background: C.card, border: `1px solid ${C.line}`, borderRadius: 14, padding: 16, cursor: "pointer", position: "relative", overflow: "hidden" }}>
-                    <div style={{ position: "absolute", top: 0, left: 0, width: 4, height: "100%", background: col }} />
-                    <div className="display" style={{ fontSize: 19, fontWeight: 700, lineHeight: 1.15, paddingLeft: 6 }}>{r.bucket}</div>
-                    {r.where && <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: ".06em", fontWeight: 700, marginTop: 4, paddingLeft: 6 }}>{r.where}</div>}
-
-                    <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 14, paddingLeft: 6 }}>
-                      <span className="display" style={{ fontSize: 26, fontWeight: 700, color: r.left < 0 ? C.red : C.ink, lineHeight: 1 }}>{money(r.left)}</span>
-                      <span style={{ fontSize: 11, color: C.muted, fontWeight: 600 }}>left</span>
-                    </div>
-                    <div style={{ fontSize: 11, color: C.muted, marginTop: 4, paddingLeft: 6 }}>
-                      {money(r.spent)} spent of {money(r.amount)}
-                    </div>
-
-                    <div style={{ background: "#eef1f5", borderRadius: 999, height: 6, overflow: "hidden", marginTop: 12, marginLeft: 6 }}>
-                      <div style={{ width: r.pct + "%", height: "100%", background: col, borderRadius: 999, transition: "width .3s" }} />
-                    </div>
-
-                    <div className="cardhint" style={{ fontSize: 11, color: C.teal, fontWeight: 700, marginTop: 10, paddingLeft: 6, display: "flex", alignItems: "center", gap: 4 }}>
-                      <Plus size={12} /> Log a spend
-                    </div>
-                  </div>
-                );
-              })}
+          <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 12 }}>
+            <div style={{ flex: 1, maxWidth: 340, background: "#EDE9DD", borderRadius: 999, height: 6, overflow: "hidden" }}>
+              <div style={{ width: Math.min(100, totals.pct) + "%", height: "100%", background: totals.pct > 90 ? T.red : T.green, borderRadius: 999 }} />
             </div>
-          )}
-        </div>
+            <span className="num" style={{ fontSize: 13, color: T.muted }}>
+              {money(totals.spent)} spent of {money(totals.allocated)}
+            </span>
+          </div>
+        </header>
 
-        {/* charts */}
-        <div className="grid2" style={{ marginBottom: 16 }}>
+        {status === "error" && (
+          <div style={{ display: "flex", gap: 9, background: T.redTint, color: T.red, padding: "12px 14px", borderRadius: 12, fontSize: 13, marginBottom: 18 }}>
+            <AlertCircle size={16} style={{ flexShrink: 0, marginTop: 1 }} />
+            <span>Couldn't reach the sheet. Open the <b>/exec</b> link in a tab to check it returns JSON, then refresh.</span>
+          </div>
+        )}
+
+        {/* ── envelopes ── */}
+        <section style={{ marginBottom: 26 }}>
+          <div className="cardgrid">
+            {rows.map((r, i) => {
+              const tone = fillTone(r);
+              const active = activeBucket === r.bucket;
+              return (
+                <div key={i} className="env" role="button" tabIndex={0}
+                  onClick={() => !active && openCard(r.bucket)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !active) openCard(r.bucket); if (e.key === "Escape" && active) closeCard(); }}
+                  style={active ? { cursor: "default", borderColor: r.color } : {}}>
+                  {/* identity spine */}
+                  <div aria-hidden style={{ position: "absolute", top: 0, left: 0, width: 5, height: "100%", background: r.color, zIndex: 1 }} />
+                  {/* the draining fill */}
+                  <div className="envfill" aria-hidden style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: (active ? 0 : r.leftPct) + "%", background: tone.fill }} />
+
+                  {!active ? (
+                    <>
+                      <div style={{ position: "relative", paddingLeft: 6 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                          <div className="serif" style={{ fontSize: 22, lineHeight: 1.1, color: r.color }}>{r.bucket}</div>
+                          {tone.badge && (
+                            <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", background: tone.badge.bg, color: tone.badge.fg, borderRadius: 999, padding: "3px 8px", flexShrink: 0 }}>
+                              {tone.badge.text}
+                            </span>
+                          )}
+                        </div>
+                        {r.where && <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: T.muted, marginTop: 4 }}>{r.where}</div>}
+                      </div>
+                      <div style={{ position: "relative", paddingLeft: 6 }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+                          <span className="serif num" style={{ fontSize: 30, color: r.left < 0 ? T.red : T.ink }}>{money(r.left)}</span>
+                          <span style={{ fontSize: 11, fontWeight: 600, color: r.left < 0 ? T.red : T.muted }}>{r.left < 0 ? "over" : "left"}</span>
+                        </div>
+                        <div className="num" style={{ fontSize: 11, color: T.muted, marginTop: 3 }}>{money(r.spent)} spent of {money(r.amount)}</div>
+                      </div>
+                    </>
+                  ) : (
+                    /* the card flips into a quick-log form */
+                    <div style={{ position: "relative", display: "flex", flexDirection: "column", gap: 9 }} onClick={(e) => e.stopPropagation()}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <span className="serif" style={{ fontSize: 19 }}>{r.bucket}</span>
+                        <button className="ghost" style={{ padding: 5 }} onClick={closeCard} aria-label="Cancel"><X size={15} /></button>
+                      </div>
+                      <input ref={amountRef} value={fAmount} onChange={(e) => setFAmount(e.target.value.replace(/[^0-9]/g, ""))}
+                        onKeyDown={(e) => { if (e.key === "Enter") logSpend(); if (e.key === "Escape") closeCard(); }}
+                        placeholder="₹ amount" inputMode="numeric"
+                        style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: "10px 12px", fontSize: 17, fontWeight: 600, width: "100%" }} />
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        {CHIPS.map((c) => <button key={c} className="chipbtn" onClick={() => chip(c)}>+{c}</button>)}
+                      </div>
+                      <input value={fDesc} onChange={(e) => setFDesc(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") logSpend(); if (e.key === "Escape") closeCard(); }}
+                        placeholder="What was it? (optional)"
+                        style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: "9px 12px", fontSize: 13, width: "100%" }} />
+                      <button className="primary" onClick={logSpend} disabled={!Number(fAmount)}
+                        style={{ opacity: Number(fAmount) ? 1 : 0.45 }}>
+                        Log {Number(fAmount) ? money(Number(fAmount)) : "spend"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        {/* ── where it went + passbook ── */}
+        <section className="grid2">
           <div className="panel">
-            <Label icon={<PieIcon size={15} color={C.teal} />} text="Where it went" color={C.teal} />
-            {pieData.length === 0 ? <div style={{ fontSize: 13, color: C.muted, marginTop: 12 }}>No spends logged yet.</div> : (
-              <div style={{ height: 240, marginTop: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+              <PieIcon size={15} color={T.green} />
+              <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: T.green }}>Where it went</span>
+            </div>
+            {pieData.length === 0 ? (
+              <div style={{ fontSize: 13, color: T.muted, marginTop: 10 }}>Log your first spend and the picture starts here.</div>
+            ) : (
+              <div style={{ height: 230 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
-                    <Pie data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={85} label={(d) => d.name}>
-                      {pieData.map((e, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
+                    <Pie data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={48} outerRadius={82} paddingAngle={2}>
+                      {pieData.map((e, i) => <Cell key={i} fill={e.color} />)}
                     </Pie>
-                    <Tooltip formatter={(v) => money(v)} />
+                    <Tooltip formatter={(v) => money(v)} contentStyle={{ borderRadius: 10, border: `1px solid ${T.line}`, fontFamily: "inherit", fontSize: 13 }} />
                   </PieChart>
                 </ResponsiveContainer>
               </div>
             )}
           </div>
+
           <div className="panel">
-            <Label icon={<TrendingDown size={15} color={C.amber} />} text="Spent vs left" color={C.amber} />
-            <div style={{ height: 240, marginTop: 10 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={barData} margin={{ top: 5, right: 5, left: -18, bottom: 40 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#eef1f5" />
-                  <XAxis dataKey="name" tick={{ fontSize: 10 }} angle={-35} textAnchor="end" interval={0} />
-                  <YAxis tick={{ fontSize: 10 }} />
-                  <Tooltip formatter={(v) => money(v)} />
-                  <Bar dataKey="Spent" stackId="a" fill={C.amber} />
-                  <Bar dataKey="Left" stackId="a" fill="#dbe3ea" />
-                </BarChart>
-              </ResponsiveContainer>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+              <BookOpen size={15} color={T.ink} />
+              <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase" }}>Passbook</span>
             </div>
+            {recent.length === 0 ? (
+              <div style={{ fontSize: 13, color: T.muted, marginTop: 10 }}>Nothing logged yet — tap any envelope above.</div>
+            ) : (
+              <div>
+                {recent.map((s, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: i < recent.length - 1 ? `1px solid ${T.line}` : "none" }}>
+                    <span aria-hidden style={{ width: 8, height: 8, borderRadius: 999, background: colorOf(s.bucket), flexShrink: 0 }} />
+                    <span className="num" style={{ fontSize: 11, color: T.muted, width: 52, flexShrink: 0 }}>{niceDate(s.date)}</span>
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <span style={{ fontSize: 14, fontWeight: 600 }}>{s.description || s.bucket}</span>
+                      <span style={{ fontSize: 11, color: T.muted, marginLeft: 7 }}>{s.bucket}</span>
+                    </span>
+                    <span className="serif num" style={{ fontSize: 17 }}>{money(s.amount)}</span>
+                    <button className="ghost" style={{ padding: 4 }} onClick={() => deleteSpend(s)} aria-label={"Delete " + s.description}>
+                      <X size={13} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
-        </div>
-
-        {/* recent */}
-        <div className="panel">
-          <Label icon={<Receipt size={15} color={C.navy} />} text="Recent spends" color={C.navy} count={spends.length} />
-          {recent.length === 0 ? <div style={{ fontSize: 13, color: C.muted, marginTop: 10 }}>Nothing logged yet.</div> : (
-            <div style={{ display: "flex", flexDirection: "column", marginTop: 10 }}>
-              {recent.map((s, i) => (
-                <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, fontSize: 13, borderBottom: i < recent.length - 1 ? `1px solid ${C.line}` : "none", padding: "9px 0" }}>
-                  <span style={{ display: "flex", flexDirection: "column" }}>
-                    <span style={{ fontWeight: 600 }}>{s.description || s.bucket}</span>
-                    <span style={{ fontSize: 11, color: C.muted }}>{s.bucket} · {s.date}</span>
-                  </span>
-                  <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <b>{money(s.amount)}</b>
-                    <X size={14} color="#c4ccd6" style={{ cursor: "pointer" }} onClick={() => deleteSpend(s)} />
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {updated && status === "ok" && (
-          <div style={{ fontSize: 12, color: C.muted, marginTop: 14 }}>Updated {updated.toLocaleTimeString()} · auto-refreshes every minute</div>
-        )}
+        </section>
       </div>
-    </div>
-  );
-}
 
-function Stat({ label, value, color }) {
-  return (
-    <div style={{ textAlign: "right" }}>
-      <div className="display" style={{ fontSize: 19, fontWeight: 700, color, lineHeight: 1 }}>{value}</div>
-      <div style={{ fontSize: 9, color: "#98a4bd", textTransform: "uppercase", letterSpacing: ".08em", fontWeight: 700, marginTop: 3 }}>{label}</div>
-    </div>
-  );
-}
-function Label({ icon, text, color, count }) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      {icon}
-      <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color }}>{text}</span>
-      {count != null && <span style={{ fontSize: 11, fontWeight: 700, color: "#78808f", background: "#eef1f5", borderRadius: 999, padding: "1px 8px" }}>{count}</span>}
-    </div>
-  );
-}
-function Banner({ icon, children }) {
-  return (
-    <div style={{ display: "flex", gap: 9, alignItems: "flex-start", background: "#fbeae8", color: "#c0392b", padding: "12px 14px", borderRadius: 12, fontSize: 13, lineHeight: 1.5, marginBottom: 16 }}>
-      <span style={{ marginTop: 1 }}>{icon}</span><span>{children}</span>
+      {/* ── toast with undo ── */}
+      {toast && (
+        <div className="toastin" style={{ position: "fixed", bottom: 26, left: "50%", transform: "translateX(-50%)",
+          background: T.ink, color: "#fff", borderRadius: 12, padding: "12px 16px", fontSize: 14,
+          display: "flex", alignItems: "center", gap: 14, boxShadow: "0 10px 30px rgba(24,36,32,.25)", zIndex: 50 }}>
+          <span>{toast.text}</span>
+          <button onClick={undoSpend} style={{ border: "none", background: "transparent", color: T.mintDeep, fontWeight: 700,
+            fontSize: 13, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5, fontFamily: "inherit" }}>
+            <Undo2 size={14} /> Undo
+          </button>
+        </div>
+      )}
     </div>
   );
 }
