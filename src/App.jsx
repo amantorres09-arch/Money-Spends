@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { RefreshCw, AlertCircle, Plus, Wallet, TrendingDown, PieChart as PieIcon, Receipt, X } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
 
-// PASTE YOUR APPS SCRIPT /exec URL HERE
+// Live endpoint: Money Spends 2026 sheet (Budget + Spends tabs)
 const DATA_URL = "https://script.google.com/macros/s/AKfycbzC4jsXe7Zo_ga_soFnCWMVZF0wFCw1kbwbc0tmBxWqheX1yrTs9PvjuUtrI0HHVfQy/exec";
 
 const C = {
@@ -109,6 +109,15 @@ export default function App() {
   const barData = rows.map((r) => ({ name: r.bucket.length > 12 ? r.bucket.slice(0, 11) + "…" : r.bucket, Spent: r.spent, Left: Math.max(0, r.left) }));
   const recent = [...spends].reverse().slice(0, 8);
 
+  const openLogFor = (bucket) => {
+    setFBucket(bucket);
+    setShowForm(true);
+    setTimeout(() => {
+      const el = document.getElementById("spend-desc");
+      if (el) { el.focus(); el.scrollIntoView({ behavior: "smooth", block: "center" }); }
+    }, 60);
+  };
+
   const addSpend = async () => {
     const amt = Number(fAmount);
     if (!fBucket || !amt) return;
@@ -137,8 +146,15 @@ export default function App() {
         .panel { background:${C.card}; border:1px solid ${C.line}; border-radius:14px; padding:18px; }
         .spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
         .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+        .cardgrid { display:grid; grid-template-columns:repeat(3, 1fr); gap:14px; }
+        .bucketcard { transition: box-shadow .15s, transform .15s, border-color .15s; }
+        .bucketcard:hover { box-shadow:0 6px 18px rgba(31,45,74,.10); transform:translateY(-2px); border-color:#c9d2dd!important; }
+        .cardhint { opacity:0; transition:opacity .15s; }
+        .bucketcard:hover .cardhint { opacity:1; }
         input,select { font-family:inherit; }
+        @media (max-width:900px){ .cardgrid{ grid-template-columns:repeat(2, 1fr); } }
         @media (max-width:800px){ .grid2{ grid-template-columns:1fr; } .wrap{ padding:16px 12px 60px!important; } .hdr{ flex-direction:column; align-items:flex-start!important; gap:14px!important; } }
+        @media (max-width:560px){ .cardgrid{ grid-template-columns:1fr; } .cardhint{ opacity:1; } }
       `}</style>
 
       <div className="wrap" style={{ maxWidth: 1060, margin: "0 auto", padding: "26px 20px 80px" }}>
@@ -185,33 +201,51 @@ export default function App() {
                 <option value="">Which bucket…</option>
                 {rows.map((r, i) => <option key={i} value={r.bucket}>{r.bucket}</option>)}
               </select>
-              <input value={fDesc} onChange={(e) => setFDesc(e.target.value)} placeholder="What was it?" style={{ border: `1px solid ${C.line}`, borderRadius: 8, padding: "9px 10px", fontSize: 13, flex: 1, minWidth: 140 }} />
+              <input id="spend-desc" value={fDesc} onChange={(e) => setFDesc(e.target.value)} placeholder="What was it?" style={{ border: `1px solid ${C.line}`, borderRadius: 8, padding: "9px 10px", fontSize: 13, flex: 1, minWidth: 140 }} />
               <input value={fAmount} onChange={(e) => setFAmount(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addSpend()} placeholder="Amount" inputMode="numeric" style={{ border: `1px solid ${C.line}`, borderRadius: 8, padding: "9px 10px", fontSize: 13, width: 110 }} />
               <button onClick={addSpend} style={{ background: C.teal, color: "#fff", border: "none", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Log</button>
             </div>
           )}
         </div>
 
-        {/* budget bars */}
-        <div className="panel" style={{ marginBottom: 16 }}>
-          <Label icon={<Wallet size={15} color={C.green} />} text="Buckets" color={C.green} />
-          <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 14 }}>
-            {rows.length === 0 ? <div style={{ fontSize: 13, color: C.muted }}>No buckets found. Check the Budget tab has Bucket / Amount headers on row 1.</div>
-            : rows.map((r, i) => (
-              <div key={i}>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 5 }}>
-                  <span style={{ fontWeight: 600 }}>{r.bucket} {r.where && <span style={{ color: C.muted, fontWeight: 400, fontSize: 11 }}>· {r.where}</span>}</span>
-                  <span style={{ color: C.muted }}>
-                    <b style={{ color: barColor(r) }}>{money(r.spent)}</b> / {money(r.amount)}
-                    <span style={{ marginLeft: 8, fontWeight: 700, color: r.left < 0 ? C.red : C.muted }}>{money(r.left)} left</span>
-                  </span>
-                </div>
-                <div style={{ background: "#eef1f5", borderRadius: 999, height: 7, overflow: "hidden" }}>
-                  <div style={{ width: r.pct + "%", height: "100%", background: barColor(r), borderRadius: 999, transition: "width .3s" }} />
-                </div>
-              </div>
-            ))}
+        {/* bucket cards */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ marginBottom: 12 }}>
+            <Label icon={<Wallet size={15} color={C.green} />} text="Buckets" color={C.green} count={rows.length} />
           </div>
+          {rows.length === 0 ? (
+            <div className="panel" style={{ fontSize: 13, color: C.muted }}>No buckets found. Check the Budget tab has Bucket / Amount headers on row 1.</div>
+          ) : (
+            <div className="cardgrid">
+              {rows.map((r, i) => {
+                const col = barColor(r);
+                return (
+                  <div key={i} className="bucketcard" onClick={() => openLogFor(r.bucket)}
+                    style={{ background: C.card, border: `1px solid ${C.line}`, borderRadius: 14, padding: 16, cursor: "pointer", position: "relative", overflow: "hidden" }}>
+                    <div style={{ position: "absolute", top: 0, left: 0, width: 4, height: "100%", background: col }} />
+                    <div className="display" style={{ fontSize: 19, fontWeight: 700, lineHeight: 1.15, paddingLeft: 6 }}>{r.bucket}</div>
+                    {r.where && <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: ".06em", fontWeight: 700, marginTop: 4, paddingLeft: 6 }}>{r.where}</div>}
+
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 14, paddingLeft: 6 }}>
+                      <span className="display" style={{ fontSize: 26, fontWeight: 700, color: r.left < 0 ? C.red : C.ink, lineHeight: 1 }}>{money(r.left)}</span>
+                      <span style={{ fontSize: 11, color: C.muted, fontWeight: 600 }}>left</span>
+                    </div>
+                    <div style={{ fontSize: 11, color: C.muted, marginTop: 4, paddingLeft: 6 }}>
+                      {money(r.spent)} spent of {money(r.amount)}
+                    </div>
+
+                    <div style={{ background: "#eef1f5", borderRadius: 999, height: 6, overflow: "hidden", marginTop: 12, marginLeft: 6 }}>
+                      <div style={{ width: r.pct + "%", height: "100%", background: col, borderRadius: 999, transition: "width .3s" }} />
+                    </div>
+
+                    <div className="cardhint" style={{ fontSize: 11, color: C.teal, fontWeight: 700, marginTop: 10, paddingLeft: 6, display: "flex", alignItems: "center", gap: 4 }}>
+                      <Plus size={12} /> Log a spend
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* charts */}
