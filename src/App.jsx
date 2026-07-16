@@ -54,7 +54,32 @@ export default function App() {
   const [budgetRows, setBudgetRows] = useState([]);
   const [spendRows, setSpendRows] = useState([]);
   const [status, setStatus] = useState("loading");
-  const [mode, setMode] = useState("month"); // "month" | "overall"
+  // view: "overall" or a month key "YYYY-MM"
+  const [view, setView] = useState(thisMonthKey());
+
+  const monthKeys = useMemo(() => {
+    const keys = [];
+    let [y, m] = BUDGET_START.split("-").map(Number);
+    const now = thisMonthKey();
+    while (true) {
+      const k = y + "-" + String(m).padStart(2, "0");
+      keys.push(k);
+      if (k === now) break;
+      m++; if (m > 12) { m = 1; y++; }
+      if (keys.length > 240) break; // safety
+    }
+    return keys;
+  }, []);
+  const monthLabel = (k) => {
+    const [y, m] = k.split("-").map(Number);
+    return new Date(y, m - 1, 1).toLocaleDateString("en-IN", { month: "short", year: "numeric" });
+  };
+  const stepMonth = (dir) => {
+    if (view === "overall") return;
+    const i = monthKeys.indexOf(view);
+    const next = monthKeys[i + dir];
+    if (next) setView(next);
+  };
   const [activeBucket, setActiveBucket] = useState(null); // card in log mode
   const [fDesc, setFDesc] = useState("");
   const [fAmount, setFAmount] = useState("");
@@ -122,20 +147,19 @@ export default function App() {
   }, [spendRows]);
 
   const scopedSpends = useMemo(() => {
-    if (mode === "overall") return spends;
-    const key = thisMonthKey();
-    return spends.filter((s) => (s.date || "").slice(0, 7) === key);
-  }, [spends, mode]);
+    if (view === "overall") return spends;
+    return spends.filter((s) => (s.date || "").slice(0, 7) === view);
+  }, [spends, view]);
 
   const rows = useMemo(() => {
-    const mult = mode === "overall" ? monthsElapsed() : 1;
+    const mult = view === "overall" ? monthsElapsed() : 1;
     return buckets.map((b) => {
       const pot = b.amount * mult;
       const spent = scopedSpends.filter((s) => s.bucket === b.bucket).reduce((n, s) => n + s.amount, 0);
       const left = pot - spent;
       return { ...b, pot, spent, left, leftPct: pot ? Math.max(0, Math.min(100, (left / pot) * 100)) : 0 };
     });
-  }, [buckets, scopedSpends, mode]);
+  }, [buckets, scopedSpends, view]);
 
   const totals = useMemo(() => {
     const allocated = rows.reduce((n, r) => n + r.pot, 0);
@@ -172,6 +196,7 @@ export default function App() {
     const spend = { date: today, bucket: activeBucket, description: fDesc.trim(), amount: amt };
     setSpendRows((r) => [...r, [today, spend.bucket, spend.description, String(amt)]]);
     closeCard();
+    if (view !== "overall") setView(today.slice(0, 7));
     showToast("Logged " + money(amt) + " to " + spend.bucket, spend);
     try { await post({ action: "addSpend", ...spend }); } catch {}
   };
@@ -252,15 +277,27 @@ export default function App() {
               Money Spends 2026
             </div>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <div role="tablist" aria-label="View" style={{ display: "flex", background: "#EFEBE0", borderRadius: 999, padding: 3 }}>
-                {[["month", "This month"], ["overall", "Overall"]].map(([k, lbl]) => (
-                  <button key={k} role="tab" aria-selected={mode === k} onClick={() => setMode(k)}
-                    style={{ border: "none", cursor: "pointer", borderRadius: 999, padding: "6px 14px", fontSize: 12, fontWeight: 700, fontFamily: "inherit",
-                      background: mode === k ? T.card : "transparent", color: mode === k ? T.ink : T.muted,
-                      boxShadow: mode === k ? "0 1px 4px rgba(24,36,32,.12)" : "none" }}>
-                    {lbl}
-                  </button>
-                ))}
+              <div role="tablist" aria-label="View" style={{ display: "flex", alignItems: "center", background: "#EFEBE0", borderRadius: 999, padding: 3 }}>
+                <button aria-label="Previous month" onClick={() => { view === "overall" ? setView(monthKeys[monthKeys.length - 1]) : stepMonth(-1); }}
+                  disabled={view !== "overall" && monthKeys.indexOf(view) === 0}
+                  style={{ border: "none", background: "transparent", cursor: "pointer", padding: "4px 7px", color: T.muted, fontFamily: "inherit",
+                    opacity: (view !== "overall" && monthKeys.indexOf(view) === 0) ? 0.3 : 1 }}>‹</button>
+                <button role="tab" aria-selected={view !== "overall"} onClick={() => view === "overall" && setView(thisMonthKey())}
+                  style={{ border: "none", cursor: "pointer", borderRadius: 999, padding: "6px 12px", fontSize: 12, fontWeight: 700, fontFamily: "inherit", minWidth: 76,
+                    background: view !== "overall" ? T.card : "transparent", color: view !== "overall" ? T.ink : T.muted,
+                    boxShadow: view !== "overall" ? "0 1px 4px rgba(24,36,32,.12)" : "none" }}>
+                  {view !== "overall" ? monthLabel(view) : monthLabel(thisMonthKey())}
+                </button>
+                <button aria-label="Next month" onClick={() => stepMonth(1)}
+                  disabled={view === "overall" || monthKeys.indexOf(view) === monthKeys.length - 1}
+                  style={{ border: "none", background: "transparent", cursor: "pointer", padding: "4px 7px", color: T.muted, fontFamily: "inherit",
+                    opacity: (view === "overall" || monthKeys.indexOf(view) === monthKeys.length - 1) ? 0.3 : 1 }}>›</button>
+                <button role="tab" aria-selected={view === "overall"} onClick={() => setView("overall")}
+                  style={{ border: "none", cursor: "pointer", borderRadius: 999, padding: "6px 14px", fontSize: 12, fontWeight: 700, fontFamily: "inherit",
+                    background: view === "overall" ? T.card : "transparent", color: view === "overall" ? T.ink : T.muted,
+                    boxShadow: view === "overall" ? "0 1px 4px rgba(24,36,32,.12)" : "none" }}>
+                  Overall
+                </button>
               </div>
               <button className="ghost" onClick={load} aria-label="Refresh">
                 <RefreshCw size={15} className={status === "loading" ? "spin" : ""} />
@@ -272,7 +309,7 @@ export default function App() {
               {money(totals.left)}
             </span>
             <span className="serif" style={{ fontSize: 26, color: T.muted, fontStyle: "italic" }}>
-              {mode === "month" ? "left this month" : "left overall"}
+              {view === "overall" ? "left overall" : view === thisMonthKey() ? "left this month" : "unspent in " + monthLabel(view)}
             </span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 12 }}>
@@ -280,7 +317,7 @@ export default function App() {
               <div style={{ width: Math.min(100, totals.pct) + "%", height: "100%", background: totals.pct > 90 ? T.red : T.green, borderRadius: 999 }} />
             </div>
             <span className="num" style={{ fontSize: 13, color: T.muted }}>
-              {money(totals.spent)} spent of {money(totals.allocated)}{mode === "overall" ? " accrued since Jun 2026" : ""}
+              {money(totals.spent)} spent of {money(totals.allocated)}{view === "overall" ? " accrued since Jun 2026" : ""}
             </span>
           </div>
         </header>
