@@ -56,6 +56,11 @@ export default function App() {
   const [status, setStatus] = useState("loading");
   // view: "overall" or a month key "YYYY-MM"
   const [view, setView] = useState(thisMonthKey());
+  const [page, setPage] = useState("budget"); // "budget" | "position"
+  const [accountRows, setAccountRows] = useState([]);
+  const [activeAccount, setActiveAccount] = useState(null);
+  const [fBalance, setFBalance] = useState("");
+  const balanceRef = useRef(null);
 
   const monthKeys = useMemo(() => {
     const keys = [];
@@ -98,6 +103,7 @@ export default function App() {
         .filter((r) => r.some((c) => c.trim() !== ""));
       setBudgetRows(clean(json.budget));
       setSpendRows(clean(json.spends));
+      setAccountRows(clean(json.accounts));
       setStatus("ok");
     } catch (e) { setStatus("error"); }
   }, []);
@@ -192,7 +198,7 @@ export default function App() {
   const logSpend = async () => {
     const amt = Number(fAmount);
     if (!activeBucket || !amt) return;
-    const today = new Date().toISOString().split("T")[0];
+    const today = localToday();
     const spend = { date: today, bucket: activeBucket, description: fDesc.trim(), amount: amt };
     setSpendRows((r) => [...r, [today, spend.bucket, spend.description, String(amt)]]);
     closeCard();
@@ -224,6 +230,52 @@ export default function App() {
   const chip = (v) => setFAmount(String((Number(fAmount) || 0) + v));
 
   /* fill colour by how empty the envelope is */
+  /* ── accounts (Position page) ─────────────────────── */
+  const ACCOUNT_COLORS = { "sbi": "#2D5D9F", "bob": "#D96C2C", "jupiter": "#E8590C", "amazon": "#B08A2E", "google": "#34A06B", "cash": "#5F7161" };
+  const accountColor = (name, idx) => {
+    const n = name.toLowerCase();
+    for (const k in ACCOUNT_COLORS) if (n.includes(k)) return ACCOUNT_COLORS[k];
+    return BUCKET_COLORS[idx % BUCKET_COLORS.length];
+  };
+  const accounts = useMemo(() => {
+    if (!accountRows.length) return [];
+    let hi = accountRows.findIndex((r) => {
+      const c = r.map((x) => String(x).toLowerCase().trim());
+      return c.includes("account") && c.includes("balance");
+    });
+    if (hi === -1) hi = 0;
+    const h = accountRows[hi].map((x) => String(x).trim().toLowerCase());
+    const ni = h.indexOf("account"), bi = h.indexOf("balance"), ui = h.indexOf("updated");
+    return accountRows.slice(hi + 1).map((r, idx) => ({
+      account: String(r[ni] || "").trim(),
+      balance: Number(String(r[bi] || "0").replace(/[^0-9.-]/g, "")) || 0,
+      updated: ui >= 0 ? fmtDate(r[ui]) : "",
+      color: accountColor(String(r[ni] || ""), idx),
+    })).filter((a) => a.account);
+  }, [accountRows]);
+  const positionTotal = accounts.reduce((n, a) => n + a.balance, 0);
+
+  const localToday = () => {
+    const d = new Date();
+    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  };
+
+  const openAccount = (name, current) => {
+    setActiveAccount(name); setFBalance(String(current));
+    setTimeout(() => { balanceRef.current?.focus(); balanceRef.current?.select(); }, 60);
+  };
+  const closeAccount = () => { setActiveAccount(null); setFBalance(""); };
+  const saveBalance = async () => {
+    const bal = Number(fBalance);
+    if (!activeAccount || isNaN(bal)) return;
+    const name = activeAccount, today = localToday();
+    setAccountRows((rows) => rows.map((r) =>
+      String(r[0]).trim() === name ? [r[0], String(bal), today] : r));
+    closeAccount();
+    showToast("Updated " + name + " to " + money(bal), null);
+    try { await post({ action: "setBalance", account: name, balance: bal }); } catch {}
+  };
+
   /* identity colour carries the fill; health gets a badge */
   const fillTone = (r) => ({
     fill: r.left < 0 ? T.redTint : tint(r.color),
@@ -273,10 +325,19 @@ export default function App() {
         {/* ── masthead: the one number that matters ── */}
         <header style={{ marginBottom: 30 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: ".14em", textTransform: "uppercase", color: T.muted }}>
-              Money Spends 2026
-            </div>
+            <nav aria-label="Pages" style={{ display: "flex", gap: 16, alignItems: "baseline" }}>
+              {[["budget", "Budget"], ["position", "Position"]].map(([k, lbl]) => (
+                <button key={k} onClick={() => setPage(k)}
+                  style={{ border: "none", background: "transparent", cursor: "pointer", padding: 0, fontFamily: "inherit",
+                    fontSize: 12, fontWeight: 700, letterSpacing: ".14em", textTransform: "uppercase",
+                    color: page === k ? T.ink : T.muted,
+                    borderBottom: page === k ? `2px solid ${T.green}` : "2px solid transparent", paddingBottom: 3 }}>
+                  {lbl}
+                </button>
+              ))}
+            </nav>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              {page === "budget" && (
               <div role="tablist" aria-label="View" style={{ display: "flex", alignItems: "center", background: "#EFEBE0", borderRadius: 999, padding: 3 }}>
                 <button aria-label="Previous month" onClick={() => { view === "overall" ? setView(monthKeys[monthKeys.length - 1]) : stepMonth(-1); }}
                   disabled={view !== "overall" && monthKeys.indexOf(view) === 0}
@@ -299,27 +360,46 @@ export default function App() {
                   Overall
                 </button>
               </div>
+              )}
               <button className="ghost" onClick={load} aria-label="Refresh">
                 <RefreshCw size={15} className={status === "loading" ? "spin" : ""} />
               </button>
             </div>
           </div>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginTop: 10 }}>
-            <span className="serif num" style={{ fontSize: 64, lineHeight: 1, color: totals.left < 0 ? T.red : T.ink }}>
-              {money(totals.left)}
-            </span>
-            <span className="serif" style={{ fontSize: 26, color: T.muted, fontStyle: "italic" }}>
-              {view === "overall" ? "left overall" : view === thisMonthKey() ? "left this month" : "unspent in " + monthLabel(view)}
-            </span>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 12 }}>
-            <div style={{ flex: 1, maxWidth: 340, background: "#EDE9DD", borderRadius: 999, height: 6, overflow: "hidden" }}>
-              <div style={{ width: Math.min(100, totals.pct) + "%", height: "100%", background: totals.pct > 90 ? T.red : T.green, borderRadius: 999 }} />
-            </div>
-            <span className="num" style={{ fontSize: 13, color: T.muted }}>
-              {money(totals.spent)} spent of {money(totals.allocated)}{view === "overall" ? " accrued since Jun 2026" : ""}
-            </span>
-          </div>
+          {page === "budget" ? (
+            <>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginTop: 10 }}>
+                <span className="serif num" style={{ fontSize: 64, lineHeight: 1, color: totals.left < 0 ? T.red : T.ink }}>
+                  {money(totals.left)}
+                </span>
+                <span className="serif" style={{ fontSize: 26, color: T.muted, fontStyle: "italic" }}>
+                  {view === "overall" ? "left overall" : view === thisMonthKey() ? "left this month" : "unspent in " + monthLabel(view)}
+                </span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 12 }}>
+                <div style={{ flex: 1, maxWidth: 340, background: "#EDE9DD", borderRadius: 999, height: 6, overflow: "hidden" }}>
+                  <div style={{ width: Math.min(100, totals.pct) + "%", height: "100%", background: totals.pct > 90 ? T.red : T.green, borderRadius: 999 }} />
+                </div>
+                <span className="num" style={{ fontSize: 13, color: T.muted }}>
+                  {money(totals.spent)} spent of {money(totals.allocated)}{view === "overall" ? " accrued since Jun 2026" : ""}
+                </span>
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginTop: 10 }}>
+                <span className="serif num" style={{ fontSize: 64, lineHeight: 1 }}>{money(positionTotal)}</span>
+                <span className="serif" style={{ fontSize: 26, color: T.muted, fontStyle: "italic" }}>across your accounts</span>
+              </div>
+              {positionTotal > 0 && (
+                <div style={{ display: "flex", maxWidth: 420, height: 8, borderRadius: 999, overflow: "hidden", marginTop: 14 }}>
+                  {accounts.filter((a) => a.balance > 0).map((a, i) => (
+                    <div key={i} title={a.account} style={{ width: (a.balance / positionTotal) * 100 + "%", background: a.color }} />
+                  ))}
+                </div>
+              )}
+            </>
+          )}
         </header>
 
         {status === "error" && (
@@ -329,6 +409,7 @@ export default function App() {
           </div>
         )}
 
+        {page === "budget" ? (<>
         {/* ── envelopes ── */}
         <section style={{ marginBottom: 26 }}>
           <div className="cardgrid">
@@ -446,6 +527,49 @@ export default function App() {
             )}
           </div>
         </section>
+        </>) : (
+        /* ── Position page: account cards ── */
+        <section className="cardgrid">
+          {accounts.length === 0 ? (
+            <div className="panel" style={{ fontSize: 13, color: T.muted, gridColumn: "1 / -1" }}>
+              No accounts found. Add an <b>Accounts</b> tab to the sheet with Account / Balance / Updated headers on row 1.
+            </div>
+          ) : accounts.map((a, i) => {
+            const active = activeAccount === a.account;
+            return (
+              <div key={i} className="env" role="button" tabIndex={0} style={{ minHeight: 140, ...(active ? { cursor: "default", borderColor: a.color } : {}) }}
+                onClick={() => !active && openAccount(a.account, a.balance)}
+                onKeyDown={(e) => { if (e.key === "Enter" && !active) openAccount(a.account, a.balance); if (e.key === "Escape" && active) closeAccount(); }}>
+                <div aria-hidden style={{ position: "absolute", top: 0, left: 0, width: 5, height: "100%", background: a.color, zIndex: 1 }} />
+                <div aria-hidden style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: "34%", background: tint(a.color, "1C") }} />
+                {!active ? (
+                  <>
+                    <div style={{ position: "relative", paddingLeft: 6 }}>
+                      <div className="serif" style={{ fontSize: 21, lineHeight: 1.1, color: a.color }}>{a.account}</div>
+                      {a.updated && <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: T.muted, marginTop: 4 }}>as of {niceDate(a.updated)}</div>}
+                    </div>
+                    <div style={{ position: "relative", paddingLeft: 6 }}>
+                      <span className="serif num" style={{ fontSize: 30 }}>{money(a.balance)}</span>
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ position: "relative", display: "flex", flexDirection: "column", gap: 9 }} onClick={(e) => e.stopPropagation()}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span className="serif" style={{ fontSize: 19 }}>{a.account}</span>
+                      <button className="ghost" style={{ padding: 5 }} onClick={closeAccount} aria-label="Cancel"><X size={15} /></button>
+                    </div>
+                    <input ref={balanceRef} value={fBalance} onChange={(e) => setFBalance(e.target.value.replace(/[^0-9]/g, ""))}
+                      onKeyDown={(e) => { if (e.key === "Enter") saveBalance(); if (e.key === "Escape") closeAccount(); }}
+                      placeholder="₹ current balance" inputMode="numeric"
+                      style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: "10px 12px", fontSize: 17, fontWeight: 600, width: "100%" }} />
+                    <button className="primary" onClick={saveBalance}>Update balance</button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </section>
+        )}
       </div>
 
       {/* ── toast with undo ── */}
@@ -454,10 +578,10 @@ export default function App() {
           background: T.ink, color: "#fff", borderRadius: 12, padding: "12px 16px", fontSize: 14,
           display: "flex", alignItems: "center", gap: 14, boxShadow: "0 10px 30px rgba(24,36,32,.25)", zIndex: 50 }}>
           <span>{toast.text}</span>
-          <button onClick={undoSpend} style={{ border: "none", background: "transparent", color: T.mintDeep, fontWeight: 700,
+          {toast.spend && <button onClick={undoSpend} style={{ border: "none", background: "transparent", color: T.mintDeep, fontWeight: 700,
             fontSize: 13, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5, fontFamily: "inherit" }}>
             <Undo2 size={14} /> Undo
-          </button>
+          </button>}
         </div>
       )}
     </div>
