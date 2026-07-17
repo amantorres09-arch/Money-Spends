@@ -3,21 +3,29 @@ import { RefreshCw, AlertCircle, Plus, X, Undo2, PieChart as PieIcon, BookOpen }
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 
 // Live endpoint: Money Spends 2026 sheet (Budget + Spends tabs)
-const DATA_URL = "https://script.google.com/macros/s/AKfycbzn6DjtYfNTeOG9-8nwqllaxpsO5AldvP_REQnknDeOtP3Bh885Nuc0TNYlgND8H7i6/exec";
+const DATA_URL = "https://script.google.com/macros/s/AKfycbwteEAC6RyVek1LHvDP_6Isj_vn--Yn6bKtC8i-ZznBW7fdwolKoMQUrWPKuO5dN4cf/exec";
 
 // Budget start month (YYYY-MM). Rollover accrues from here: each bucket's
 // overall pot = monthly amount × months elapsed. Edit this one line if it changes.
 const BUDGET_START = "2026-06";
 
-const monthsElapsed = () => {
+// months elapsed from BUDGET_START through a given YYYY-MM key (inclusive)
+const monthsElapsedTo = (key) => {
   const [sy, sm] = BUDGET_START.split("-").map(Number);
-  const now = new Date();
-  return Math.max(1, (now.getFullYear() - sy) * 12 + (now.getMonth() + 1 - sm) + 1);
+  const [ky, km] = key.split("-").map(Number);
+  return Math.max(1, (ky - sy) * 12 + (km - sm) + 1);
 };
 const thisMonthKey = () => {
   const now = new Date();
   return now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0");
 };
+const monthsElapsed = () => monthsElapsedTo(thisMonthKey());
+const addMonths = (key, n) => {
+  let [y, m] = key.split("-").map(Number);
+  m += n; while (m > 12) { m -= 12; y++; } while (m < 1) { m += 12; y--; }
+  return y + "-" + String(m).padStart(2, "0");
+};
+const FUTURE_MONTHS_AHEAD = 6;
 
 /* Palette — grounded in banknote ink & warm paper */
 const T = {
@@ -59,22 +67,36 @@ export default function App() {
   const [page, setPage] = useState("budget"); // "budget" | "position"
   const [accountRows, setAccountRows] = useState([]);
   const [activeAccount, setActiveAccount] = useState(null);
+  const [npBucket, setNpBucket] = useState("");
+  const [npMonth, setNpMonth] = useState("");
+  const [npDesc, setNpDesc] = useState("");
+  const [npAmount, setNpAmount] = useState("");
+  const [planView, setPlanView] = useState("buckets"); // "buckets" | "monthly"
+  const [monthlyRows, setMonthlyRows] = useState([]);
+  const [mMonth, setMMonth] = useState("");
+  const [mType, setMType] = useState("Fixed");
+  const [mDesc, setMDesc] = useState("");
+  const [mAmount, setMAmount] = useState("");
+  const [mAccount, setMAccount] = useState("");
   const [fBalance, setFBalance] = useState("");
   const balanceRef = useRef(null);
 
   const monthKeys = useMemo(() => {
     const keys = [];
     let [y, m] = BUDGET_START.split("-").map(Number);
-    const now = thisMonthKey();
+    const lastFuture = addMonths(thisMonthKey(), FUTURE_MONTHS_AHEAD);
     while (true) {
       const k = y + "-" + String(m).padStart(2, "0");
       keys.push(k);
-      if (k === now) break;
+      if (k === lastFuture) break;
       m++; if (m > 12) { m = 1; y++; }
       if (keys.length > 240) break; // safety
     }
     return keys;
   }, []);
+  const isFuture = (k) => k !== "overall" && k > thisMonthKey();
+  useEffect(() => { if (!npMonth) setNpMonth(addMonths(thisMonthKey(), 1)); }, []);
+  useEffect(() => { if (!mMonth) setMMonth(thisMonthKey()); }, []);
   const monthLabel = (k) => {
     const [y, m] = k.split("-").map(Number);
     return new Date(y, m - 1, 1).toLocaleDateString("en-IN", { month: "short", year: "numeric" });
@@ -85,10 +107,12 @@ export default function App() {
     const next = monthKeys[i + dir];
     if (next) setView(next);
   };
+  const [plannedRows, setPlannedRows] = useState([]);
   const [activeBucket, setActiveBucket] = useState(null); // card in log mode
   const [fDesc, setFDesc] = useState("");
   const [fAmount, setFAmount] = useState("");
-  const [fFlow, setFFlow] = useState("out"); // "out" spend | "in" money added
+  const [fFlow, setFFlow] = useState("out"); // "out" spend | "in" money added | "plan" future expense
+  const [fPlanMonth, setFPlanMonth] = useState("");
   const [toast, setToast] = useState(null); // {text, spend}
   const amountRef = useRef(null);
   const toastTimer = useRef(null);
@@ -105,6 +129,8 @@ export default function App() {
       setBudgetRows(clean(json.budget));
       setSpendRows(clean(json.spends));
       setAccountRows(clean(json.accounts));
+      setPlannedRows(clean(json.planned));
+      setMonthlyRows(clean(json.monthly));
       setStatus("ok");
     } catch (e) { setStatus("error"); }
   }, []);
@@ -153,29 +179,66 @@ export default function App() {
     })).filter((s) => s.bucket || s.amount);
   }, [spendRows]);
 
+  const planned = useMemo(() => {
+    if (!plannedRows.length) return [];
+    let hi = plannedRows.findIndex((r) => {
+      const c = r.map((x) => String(x).toLowerCase().trim());
+      return c.includes("bucket") && c.includes("amount");
+    });
+    if (hi === -1) hi = 0;
+    const h = plannedRows[hi].map((x) => String(x).trim().toLowerCase());
+    const mi = h.indexOf("month"), bi = h.indexOf("bucket"), si = h.indexOf("description"), ai = h.indexOf("amount");
+    return plannedRows.slice(hi + 1).map((r) => ({
+      month: String(r[mi] || "").trim(),
+      bucket: String(r[bi] || "").trim(),
+      description: si >= 0 ? String(r[si] || "").trim() : "",
+      amount: Number(String(r[ai] || "0").replace(/[^0-9.-]/g, "")) || 0,
+    })).filter((p) => p.bucket && p.month);
+  }, [plannedRows]);
+
   const scopedSpends = useMemo(() => {
     if (view === "overall") return spends;
+    // A future month's pot must net out everything already spent to date —
+    // not just spends dated in that (not-yet-arrived) month, which is always none.
+    if (isFuture(view)) return spends;
     return spends.filter((s) => (s.date || "").slice(0, 7) === view);
   }, [spends, view]);
 
+  // planned amounts scoped for MATH: cumulative through the viewed month, since
+  // money planned for July is already spoken for by the time you're projecting August.
+  const scopedPlanned = useMemo(() => {
+    if (view === "overall") return planned.filter((p) => p.month >= thisMonthKey());
+    if (isFuture(view)) return planned.filter((p) => p.month >= thisMonthKey() && p.month <= view);
+    return [];
+  }, [planned, view]);
+
+  // planned amounts scoped for DISPLAY: only what's specifically slated for the
+  // viewed month, so the Upcoming list doesn't mix in other months' plans.
+  const monthPlanned = useMemo(() => planned.filter((p) => p.month === view), [planned, view]);
+
   const rows = useMemo(() => {
-    const mult = view === "overall" ? monthsElapsed() : 1;
+    const mult = view === "overall" ? monthsElapsed() : (isFuture(view) ? monthsElapsedTo(view) : 1);
     return buckets.map((b) => {
       const pot = b.amount * mult;
       const spent = scopedSpends.filter((s) => s.bucket === b.bucket).reduce((n, s) => n + s.amount, 0);
-      const left = pot - spent;
-      return { ...b, pot, spent, left, leftPct: pot ? Math.max(0, Math.min(100, (left / pot) * 100)) : 0 };
+      const plannedAmt = scopedPlanned.filter((p) => p.bucket === b.bucket).reduce((n, p) => n + p.amount, 0);
+      const left = pot - spent - plannedAmt;
+      return { ...b, pot, spent, planned: plannedAmt, left, leftPct: pot ? Math.max(0, Math.min(100, (left / pot) * 100)) : 0 };
     });
-  }, [buckets, scopedSpends, view]);
+  }, [buckets, scopedSpends, scopedPlanned, view]);
 
   const totals = useMemo(() => {
     const allocated = rows.reduce((n, r) => n + r.pot, 0);
     const spent = rows.reduce((n, r) => n + r.spent, 0);
-    return { allocated, spent, left: allocated - spent, pct: allocated ? (spent / allocated) * 100 : 0 };
+    const reserved = rows.reduce((n, r) => n + r.planned, 0);
+    return { allocated, spent, reserved, left: allocated - spent - reserved, pct: allocated ? ((spent + reserved) / allocated) * 100 : 0 };
   }, [rows]);
 
   const pieData = rows.filter((r) => r.spent > 0).map((r) => ({ name: r.bucket, value: r.spent, color: r.color }));
-  const recent = [...scopedSpends].reverse().slice(0, 9);
+  const viewingFuture = isFuture(view);
+  const recent = viewingFuture
+    ? [...monthPlanned].reverse().slice(0, 9)
+    : [...scopedSpends].reverse().slice(0, 9);
   const colorOf = useMemo(() => {
     const m = {};
     rows.forEach((r) => { m[r.bucket] = r.color; });
@@ -185,7 +248,10 @@ export default function App() {
   /* ── actions ───────────────────────────────────────── */
   const openCard = (bucket) => {
     setActiveBucket(bucket);
-    setFDesc(""); setFAmount(""); setFFlow("out");
+    setFDesc(""); setFAmount("");
+    const future = isFuture(view);
+    setFFlow(future ? "plan" : "out");
+    setFPlanMonth(future ? view : addMonths(thisMonthKey(), 1));
     setTimeout(() => amountRef.current?.focus(), 60);
   };
   const closeCard = () => { setActiveBucket(null); setFDesc(""); setFAmount(""); };
@@ -199,6 +265,17 @@ export default function App() {
   const logSpend = async () => {
     const raw = Number(fAmount);
     if (!activeBucket || !raw) return;
+
+    if (fFlow === "plan") {
+      const month = fPlanMonth || addMonths(thisMonthKey(), 1);
+      const item = { month, bucket: activeBucket, description: fDesc.trim(), amount: raw };
+      setPlannedRows((r) => [...r, [month, item.bucket, item.description, String(raw)]]);
+      closeCard();
+      showToast("Planned " + money(raw) + " for " + item.bucket + " in " + monthLabel(month), null);
+      try { await post({ action: "addPlanned", ...item }); } catch {}
+      return;
+    }
+
     const amt = fFlow === "in" ? -raw : raw;
     const today = localToday();
     const spend = { date: today, bucket: activeBucket, description: fDesc.trim(), amount: amt };
@@ -227,6 +304,89 @@ export default function App() {
     setSpendRows((r) => r.filter((row) =>
       !(String(row[1]).trim() === s.bucket && String(row[2]).trim() === s.description && Number(row[3]) === s.amount)));
     try { await post({ action: "deleteSpend", bucket: s.bucket, description: s.description, amount: s.amount }); } catch {}
+  };
+
+  const deletePlanned = async (p) => {
+    setPlannedRows((r) => r.filter((row) =>
+      !(String(row[0]).trim() === p.month && String(row[1]).trim() === p.bucket && String(row[2]).trim() === p.description && Number(row[3]) === p.amount)));
+    try { await post({ action: "deletePlanned", month: p.month, bucket: p.bucket, description: p.description, amount: p.amount }); } catch {}
+  };
+
+  const addPlannedFromPage = async () => {
+    const amt = Number(npAmount);
+    if (!npBucket || !amt) return;
+    const month = npMonth || addMonths(thisMonthKey(), 1);
+    const item = { month, bucket: npBucket, description: npDesc.trim(), amount: amt };
+    setPlannedRows((r) => [...r, [month, item.bucket, item.description, String(amt)]]);
+    setNpDesc(""); setNpAmount("");
+    showToast("Planned " + money(amt) + " for " + item.bucket + " in " + monthLabel(month), null);
+    try { await post({ action: "addPlanned", ...item }); } catch {}
+  };
+
+  // everything currently planned (from now onward), grouped by month, chronological
+  const plannedGroups = useMemo(() => {
+    const upcoming = planned.filter((p) => p.month >= thisMonthKey()).sort((a, b) => a.month.localeCompare(b.month));
+    const byMonth = {};
+    const order = [];
+    upcoming.forEach((p) => {
+      if (!byMonth[p.month]) { byMonth[p.month] = []; order.push(p.month); }
+      byMonth[p.month].push(p);
+    });
+    return order.map((m) => ({ month: m, items: byMonth[m], total: byMonth[m].reduce((n, p) => n + p.amount, 0) }));
+  }, [planned]);
+  const totalPlanned = plannedGroups.reduce((n, g) => n + g.total, 0);
+
+  /* ── monthly ledger (Fixed / Saved / Misc) — independent of buckets ── */
+  const monthlyEntries = useMemo(() => {
+    if (!monthlyRows.length) return [];
+    let hi = monthlyRows.findIndex((r) => {
+      const c = r.map((x) => String(x).toLowerCase().trim());
+      return c.includes("type") && c.includes("amount");
+    });
+    if (hi === -1) hi = 0;
+    const h = monthlyRows[hi].map((x) => String(x).trim().toLowerCase());
+    const mi = h.indexOf("month"), ti = h.indexOf("type"), si = h.indexOf("description"), ai = h.indexOf("amount"), acci = h.indexOf("account");
+    return monthlyRows.slice(hi + 1).map((r) => ({
+      month: String(r[mi] || "").trim(),
+      type: String(r[ti] || "").trim() || "Misc",
+      description: si >= 0 ? String(r[si] || "").trim() : "",
+      amount: Number(String(r[ai] || "0").replace(/[^0-9.-]/g, "")) || 0,
+      account: acci >= 0 ? String(r[acci] || "").trim() : "",
+    })).filter((e) => e.month && e.amount);
+  }, [monthlyRows]);
+
+  // months shown: every month with an entry, plus current + 6 future always (per your ask)
+  const ledgerMonths = useMemo(() => {
+    const set = new Set(monthlyEntries.map((e) => e.month));
+    let cur = thisMonthKey();
+    for (let i = 0; i <= FUTURE_MONTHS_AHEAD; i++) set.add(addMonths(cur, i));
+    return [...set].sort();
+  }, [monthlyEntries]);
+
+  const ledgerByMonth = useMemo(() => {
+    return ledgerMonths.map((m) => {
+      const items = monthlyEntries.filter((e) => e.month === m);
+      const byType = (t) => items.filter((e) => e.type === t);
+      const sum = (list) => list.reduce((n, e) => n + e.amount, 0);
+      const fixed = byType("Fixed"), saved = byType("Saved"), misc = byType("Misc");
+      return { month: m, fixed, saved, misc, fixedTotal: sum(fixed), savedTotal: sum(saved), miscTotal: sum(misc) };
+    });
+  }, [ledgerMonths, monthlyEntries]);
+
+  const addMonthlyEntry = async () => {
+    const amt = Number(mAmount);
+    if (!mMonth || !amt) return;
+    const item = { month: mMonth, type: mType, description: mDesc.trim(), amount: amt, account: mType === "Saved" ? mAccount : "" };
+    setMonthlyRows((r) => [...r, [item.month, item.type, item.description, String(amt), item.account]]);
+    setMDesc(""); setMAmount("");
+    showToast("Added " + money(amt) + " (" + mType + ") for " + monthLabel(mMonth), null);
+    try { await post({ action: "addMonthly", ...item }); } catch {}
+  };
+
+  const deleteMonthlyEntry = async (e) => {
+    setMonthlyRows((r) => r.filter((row) =>
+      !(String(row[0]).trim() === e.month && String(row[1]).trim() === e.type && String(row[2]).trim() === e.description && Number(row[3]) === e.amount)));
+    try { await post({ action: "deleteMonthly", month: e.month, type: e.type, description: e.description, amount: e.amount }); } catch {}
   };
 
   const chip = (v) => setFAmount(String((Number(fAmount) || 0) + v));
@@ -297,6 +457,7 @@ export default function App() {
         .wrap { max-width: 1020px; margin: 0 auto; padding: 34px 20px 90px; }
         .cardgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
         .grid2 { display: grid; grid-template-columns: 5fr 6fr; gap: 14px; }
+        .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
         .panel { background: ${T.card}; border: 1px solid ${T.line}; border-radius: 16px; padding: 20px; }
         .env { position: relative; overflow: hidden; background: ${T.card}; border: 1px solid ${T.line};
                border-radius: 16px; padding: 18px; cursor: pointer; min-height: 178px;
@@ -319,7 +480,7 @@ export default function App() {
           .toastin { animation: rise .22s ease; }
           @keyframes rise { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
         }
-        @media (max-width: 880px) { .cardgrid { grid-template-columns: repeat(2, 1fr); } .grid2 { grid-template-columns: 1fr; } }
+        @media (max-width: 880px) { .cardgrid { grid-template-columns: repeat(2, 1fr); } .grid2 { grid-template-columns: 1fr; } .grid3 { grid-template-columns: 1fr; } }
         @media (max-width: 540px) { .cardgrid { grid-template-columns: 1fr; } .wrap { padding: 22px 14px 90px; } }
       `}</style>
 
@@ -328,7 +489,7 @@ export default function App() {
         <header style={{ marginBottom: 30 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
             <nav aria-label="Pages" style={{ display: "flex", gap: 16, alignItems: "baseline" }}>
-              {[["budget", "Budget"], ["position", "Position"]].map(([k, lbl]) => (
+              {[["budget", "Budget"], ["position", "Position"], ["planning", "Planning"]].map(([k, lbl]) => (
                 <button key={k} onClick={() => setPage(k)}
                   style={{ border: "none", background: "transparent", cursor: "pointer", padding: 0, fontFamily: "inherit",
                     fontSize: 12, fontWeight: 700, letterSpacing: ".14em", textTransform: "uppercase",
@@ -347,7 +508,8 @@ export default function App() {
                     opacity: (view !== "overall" && monthKeys.indexOf(view) === 0) ? 0.3 : 1 }}>‹</button>
                 <button role="tab" aria-selected={view !== "overall"} onClick={() => view === "overall" && setView(thisMonthKey())}
                   style={{ border: "none", cursor: "pointer", borderRadius: 999, padding: "6px 12px", fontSize: 12, fontWeight: 700, fontFamily: "inherit", minWidth: 76,
-                    background: view !== "overall" ? T.card : "transparent", color: view !== "overall" ? T.ink : T.muted,
+                    background: view !== "overall" ? T.card : "transparent",
+                    color: view === "overall" ? T.muted : (isFuture(view) ? "#3E7CB1" : T.ink),
                     boxShadow: view !== "overall" ? "0 1px 4px rgba(24,36,32,.12)" : "none" }}>
                   {view !== "overall" ? monthLabel(view) : monthLabel(thisMonthKey())}
                 </button>
@@ -375,19 +537,26 @@ export default function App() {
                   {money(totals.left)}
                 </span>
                 <span className="serif" style={{ fontSize: 26, color: T.muted, fontStyle: "italic" }}>
-                  {view === "overall" ? "left overall" : view === thisMonthKey() ? "left this month" : "unspent in " + monthLabel(view)}
+                  {view === "overall" ? "free after plans"
+                    : view === thisMonthKey() ? "left this month"
+                    : isFuture(view) ? "projected for " + monthLabel(view)
+                    : "unspent in " + monthLabel(view)}
                 </span>
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 12, flexWrap: "wrap" }}>
                 <div style={{ flex: 1, maxWidth: 340, background: "#EDE9DD", borderRadius: 999, height: 6, overflow: "hidden" }}>
                   <div style={{ width: Math.min(100, totals.pct) + "%", height: "100%", background: totals.pct > 90 ? T.red : T.green, borderRadius: 999 }} />
                 </div>
                 <span className="num" style={{ fontSize: 13, color: T.muted }}>
-                  {money(totals.spent)} spent of {money(totals.allocated)}{view === "overall" ? " accrued since Jun 2026" : ""}
+                  {isFuture(view)
+                    ? money(totals.spent) + " spent so far + " + money(totals.reserved) + " planned, of " + money(totals.allocated)
+                    : money(totals.spent) + " spent of " + money(totals.allocated)}
+                  {view === "overall" ? " accrued since Jun 2026" : ""}
+                  {view === "overall" && totals.reserved > 0 ? " · " + money(totals.reserved) + " reserved for plans" : ""}
                 </span>
               </div>
             </>
-          ) : (
+          ) : page === "position" ? (
             <>
               <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginTop: 10 }}>
                 <span className="serif num" style={{ fontSize: 64, lineHeight: 1 }}>{money(positionTotal)}</span>
@@ -401,6 +570,13 @@ export default function App() {
                 </div>
               )}
             </>
+          ) : (
+            <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginTop: 10 }}>
+              <span className="serif num" style={{ fontSize: 64, lineHeight: 1, color: "#3E7CB1" }}>{money(totalPlanned)}</span>
+              <span className="serif" style={{ fontSize: 26, color: T.muted, fontStyle: "italic" }}>
+                spoken for, {plannedGroups.length} month{plannedGroups.length === 1 ? "" : "s"} ahead
+              </span>
+            </div>
           )}
         </header>
 
@@ -457,16 +633,22 @@ export default function App() {
                         <button className="ghost" style={{ padding: 5 }} onClick={closeCard} aria-label="Cancel"><X size={15} /></button>
                       </div>
                       <div style={{ display: "flex", background: "#EFEBE0", borderRadius: 999, padding: 3 }}>
-                        {[["out", "Spent"], ["in", "Add money"]].map(([k, lbl]) => (
+                        {[["out", "Spent"], ["in", "Add money"], ["plan", "Plan ahead"]].map(([k, lbl]) => (
                           <button key={k} onClick={() => setFFlow(k)}
-                            style={{ flex: 1, border: "none", cursor: "pointer", borderRadius: 999, padding: "5px 0", fontSize: 12, fontWeight: 700, fontFamily: "inherit",
+                            style={{ flex: 1, border: "none", cursor: "pointer", borderRadius: 999, padding: "5px 0", fontSize: 11, fontWeight: 700, fontFamily: "inherit",
                               background: fFlow === k ? T.card : "transparent",
-                              color: fFlow === k ? (k === "in" ? T.green : T.ink) : T.muted,
+                              color: fFlow === k ? (k === "in" ? T.green : k === "plan" ? "#3E7CB1" : T.ink) : T.muted,
                               boxShadow: fFlow === k ? "0 1px 3px rgba(24,36,32,.12)" : "none" }}>
                             {lbl}
                           </button>
                         ))}
                       </div>
+                      {fFlow === "plan" && (
+                        <select value={fPlanMonth} onChange={(e) => setFPlanMonth(e.target.value)}
+                          style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: "9px 10px", fontSize: 13, width: "100%" }}>
+                          {monthKeys.filter((k) => isFuture(k)).map((k) => <option key={k} value={k}>{monthLabel(k)}</option>)}
+                        </select>
+                      )}
                       <input ref={amountRef} value={fAmount} onChange={(e) => setFAmount(e.target.value.replace(/[^0-9]/g, ""))}
                         onKeyDown={(e) => { if (e.key === "Enter") logSpend(); if (e.key === "Escape") closeCard(); }}
                         placeholder="₹ amount" inputMode="numeric"
@@ -479,8 +661,8 @@ export default function App() {
                         placeholder="What was it? (optional)"
                         style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: "9px 12px", fontSize: 13, width: "100%" }} />
                       <button className="primary" onClick={logSpend} disabled={!Number(fAmount)}
-                        style={{ opacity: Number(fAmount) ? 1 : 0.45 }}>
-                        {fFlow === "in" ? "Add" : "Log"} {Number(fAmount) ? money(Number(fAmount)) : ""}
+                        style={{ opacity: Number(fAmount) ? 1 : 0.45, background: fFlow === "plan" ? "#3E7CB1" : T.green }}>
+                        {fFlow === "plan" ? "Plan" : fFlow === "in" ? "Add" : "Log"} {Number(fAmount) ? money(Number(fAmount)) : ""}
                       </button>
                     </div>
                   )}
@@ -498,7 +680,9 @@ export default function App() {
               <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: T.green }}>Where it went</span>
             </div>
             {pieData.length === 0 ? (
-              <div style={{ fontSize: 13, color: T.muted, marginTop: 10 }}>Log your first spend and the picture starts here.</div>
+              <div style={{ fontSize: 13, color: T.muted, marginTop: 10 }}>
+                {viewingFuture ? "Nothing spent yet — this month hasn't arrived." : "Log your first spend and the picture starts here."}
+              </div>
             ) : (
               <div style={{ height: 230 }}>
                 <ResponsiveContainer width="100%" height="100%">
@@ -516,16 +700,22 @@ export default function App() {
           <div className="panel">
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
               <BookOpen size={15} color={T.ink} />
-              <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase" }}>Passbook</span>
+              <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase" }}>
+                {viewingFuture ? "Upcoming" : "Passbook"}
+              </span>
             </div>
             {recent.length === 0 ? (
-              <div style={{ fontSize: 13, color: T.muted, marginTop: 10 }}>Nothing logged yet — tap any envelope above.</div>
+              <div style={{ fontSize: 13, color: T.muted, marginTop: 10 }}>
+                {viewingFuture ? "Nothing planned for " + monthLabel(view) + " yet — flip a card and choose Plan ahead." : "Nothing logged yet — tap any envelope above."}
+              </div>
             ) : (
               <div>
                 {recent.map((s, i) => (
                   <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: i < recent.length - 1 ? `1px solid ${T.line}` : "none" }}>
                     <span aria-hidden style={{ width: 8, height: 8, borderRadius: 999, background: colorOf(s.bucket), flexShrink: 0 }} />
-                    <span className="num" style={{ fontSize: 11, color: T.muted, width: 52, flexShrink: 0 }}>{niceDate(s.date)}</span>
+                    <span className="num" style={{ fontSize: 11, color: T.muted, width: 52, flexShrink: 0 }}>
+                      {viewingFuture ? monthLabel(s.month).split(" ")[0] : niceDate(s.date)}
+                    </span>
                     <span style={{ flex: 1, minWidth: 0 }}>
                       <span style={{ fontSize: 14, fontWeight: 600 }}>{s.description || s.bucket}</span>
                       <span style={{ fontSize: 11, color: T.muted, marginLeft: 7 }}>{s.bucket}</span>
@@ -533,7 +723,9 @@ export default function App() {
                     <span className="serif num" style={{ fontSize: 17, color: s.amount < 0 ? T.green : T.ink }}>
                       {s.amount < 0 ? "+" + money(-s.amount) : money(s.amount)}
                     </span>
-                    <button className="ghost" style={{ padding: 4 }} onClick={() => deleteSpend(s)} aria-label={"Delete " + s.description}>
+                    <button className="ghost" style={{ padding: 4 }}
+                      onClick={() => viewingFuture ? deletePlanned(s) : deleteSpend(s)}
+                      aria-label={"Delete " + s.description}>
                       <X size={13} />
                     </button>
                   </div>
@@ -542,7 +734,7 @@ export default function App() {
             )}
           </div>
         </section>
-        </>) : (
+        </>) : page === "position" ? (
         /* ── Position page: account cards ── */
         <section className="cardgrid">
           {accounts.length === 0 ? (
@@ -584,6 +776,142 @@ export default function App() {
             );
           })}
         </section>
+        ) : (
+        /* ── Planning page: everything upcoming, in one place ── */
+        <>
+          <div style={{ display: "flex", background: "#EFEBE0", borderRadius: 999, padding: 3, marginBottom: 16, maxWidth: 320 }}>
+            {[["buckets", "By bucket"], ["monthly", "Monthly ledger"]].map(([k, lbl]) => (
+              <button key={k} onClick={() => setPlanView(k)}
+                style={{ flex: 1, border: "none", cursor: "pointer", borderRadius: 999, padding: "7px 0", fontSize: 12, fontWeight: 700, fontFamily: "inherit",
+                  background: planView === k ? T.card : "transparent", color: planView === k ? "#3E7CB1" : T.muted,
+                  boxShadow: planView === k ? "0 1px 4px rgba(24,36,32,.12)" : "none" }}>
+                {lbl}
+              </button>
+            ))}
+          </div>
+
+          {planView === "buckets" ? (<>
+          <div className="panel" style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: "#3E7CB1", marginBottom: 12 }}>
+              Plan a future expense
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <select value={npBucket} onChange={(e) => setNpBucket(e.target.value)}
+                style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: "9px 10px", fontSize: 13, minWidth: 150 }}>
+                <option value="">Which bucket…</option>
+                {buckets.map((b, i) => <option key={i} value={b.bucket}>{b.bucket}</option>)}
+              </select>
+              <select value={npMonth} onChange={(e) => setNpMonth(e.target.value)}
+                style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: "9px 10px", fontSize: 13, minWidth: 120 }}>
+                {monthKeys.filter((k) => isFuture(k)).map((k) => <option key={k} value={k}>{monthLabel(k)}</option>)}
+              </select>
+              <input value={npDesc} onChange={(e) => setNpDesc(e.target.value)} placeholder="What's it for?"
+                style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: "9px 10px", fontSize: 13, flex: 1, minWidth: 140 }} />
+              <input value={npAmount} onChange={(e) => setNpAmount(e.target.value.replace(/[^0-9]/g, ""))}
+                onKeyDown={(e) => e.key === "Enter" && addPlannedFromPage()}
+                placeholder="₹ amount" inputMode="numeric"
+                style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: "9px 10px", fontSize: 13, width: 110 }} />
+              <button className="primary" style={{ background: "#3E7CB1" }} onClick={addPlannedFromPage} disabled={!npBucket || !Number(npAmount)}>
+                Plan it
+              </button>
+            </div>
+          </div>
+
+          {plannedGroups.length === 0 ? (
+            <div className="panel" style={{ fontSize: 13, color: T.muted }}>
+              Nothing planned yet. Use the form above, or flip any bucket card on a future month and choose <b>Plan ahead</b>.
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              {plannedGroups.map((g) => (
+                <div key={g.month} className="panel">
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+                    <span className="serif" style={{ fontSize: 19, color: "#3E7CB1" }}>{monthLabel(g.month)}</span>
+                    <span className="num" style={{ fontSize: 13, fontWeight: 700, color: T.muted }}>{money(g.total)} planned</span>
+                  </div>
+                  {g.items.map((p, i) => (
+                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderTop: `1px solid ${T.line}` }}>
+                      <span aria-hidden style={{ width: 8, height: 8, borderRadius: 999, background: colorOf(p.bucket), flexShrink: 0 }} />
+                      <span style={{ flex: 1, minWidth: 0 }}>
+                        <span style={{ fontSize: 14, fontWeight: 600 }}>{p.description || p.bucket}</span>
+                        <span style={{ fontSize: 11, color: T.muted, marginLeft: 7 }}>{p.bucket}</span>
+                      </span>
+                      <span className="serif num" style={{ fontSize: 16 }}>{money(p.amount)}</span>
+                      <button className="ghost" style={{ padding: 4 }} onClick={() => deletePlanned(p)} aria-label={"Delete " + p.description}>
+                        <X size={13} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+          </>) : (
+          /* ── Monthly ledger: Fixed / Saved / Misc, per month ── */
+          <>
+            <div className="panel" style={{ marginBottom: 16 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: "#3E7CB1", marginBottom: 12 }}>
+                Add a monthly line
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <select value={mMonth} onChange={(e) => setMMonth(e.target.value)}
+                  style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: "9px 10px", fontSize: 13, minWidth: 120 }}>
+                  {ledgerMonths.map((k) => <option key={k} value={k}>{monthLabel(k)}</option>)}
+                </select>
+                <select value={mType} onChange={(e) => setMType(e.target.value)}
+                  style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: "9px 10px", fontSize: 13, minWidth: 110 }}>
+                  <option value="Fixed">Fixed</option>
+                  <option value="Saved">Saved</option>
+                  <option value="Misc">Misc</option>
+                </select>
+                {mType === "Saved" && (
+                  <select value={mAccount} onChange={(e) => setMAccount(e.target.value)}
+                    style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: "9px 10px", fontSize: 13, minWidth: 130 }}>
+                    <option value="">Which account…</option>
+                    {accounts.map((a, i) => <option key={i} value={a.account}>{a.account}</option>)}
+                  </select>
+                )}
+                <input value={mDesc} onChange={(e) => setMDesc(e.target.value)} placeholder="What's it for?"
+                  style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: "9px 10px", fontSize: 13, flex: 1, minWidth: 140 }} />
+                <input value={mAmount} onChange={(e) => setMAmount(e.target.value.replace(/[^0-9]/g, ""))}
+                  onKeyDown={(e) => e.key === "Enter" && addMonthlyEntry()}
+                  placeholder="₹ amount" inputMode="numeric"
+                  style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: "9px 10px", fontSize: 13, width: 110 }} />
+                <button className="primary" style={{ background: "#3E7CB1" }} onClick={addMonthlyEntry} disabled={!mMonth || !Number(mAmount)}>
+                  Add
+                </button>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              {ledgerByMonth.map((g) => {
+                const net = g.savedTotal - g.fixedTotal - g.miscTotal;
+                return (
+                  <div key={g.month} className="panel">
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10, flexWrap: "wrap", gap: 8 }}>
+                      <span className="serif" style={{ fontSize: 19, color: isFuture(g.month) ? "#3E7CB1" : T.ink }}>{monthLabel(g.month)}</span>
+                      <span className="num" style={{ fontSize: 12, color: T.muted }}>
+                        {g.fixed.length + g.saved.length + g.misc.length === 0 ? "nothing logged" :
+                          <>{money(g.fixedTotal)} fixed · {money(g.savedTotal)} saved · {money(g.miscTotal)} misc</>}
+                      </span>
+                    </div>
+
+                    {g.fixed.length + g.saved.length + g.misc.length === 0 ? (
+                      <div style={{ fontSize: 13, color: T.muted }}>Nothing recorded for {monthLabel(g.month)} yet.</div>
+                    ) : (
+                      <div className="grid3">
+                        <LedgerColumn label="Fixed" color="#B5651D" items={g.fixed} total={g.fixedTotal} onDelete={deleteMonthlyEntry} />
+                        <LedgerColumn label="Saved" color={T.green} items={g.saved} total={g.savedTotal} onDelete={deleteMonthlyEntry} showAccount />
+                        <LedgerColumn label="Misc" color={T.gold} items={g.misc} total={g.miscTotal} onDelete={deleteMonthlyEntry} />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+          )}
+        </>
         )}
       </div>
 
@@ -597,6 +925,33 @@ export default function App() {
             fontSize: 13, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5, fontFamily: "inherit" }}>
             <Undo2 size={14} /> Undo
           </button>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LedgerColumn({ label, color, items, total, onDelete, showAccount }) {
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color }}>{label}</span>
+        <span className="num" style={{ fontSize: 12, fontWeight: 700, color }}>{total ? "₹" + total.toLocaleString("en-IN") : "—"}</span>
+      </div>
+      {items.length === 0 ? (
+        <div style={{ fontSize: 12, color: "#8A8578" }}>—</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {items.map((it, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, background: "#FAF8F3", border: "1px solid #E7E2D6", borderRadius: 8, padding: "6px 8px" }}>
+              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {it.description || label}
+                {showAccount && it.account && <span style={{ color: "#8A8578", marginLeft: 5 }}>· {it.account}</span>}
+              </span>
+              <span style={{ fontWeight: 600, whiteSpace: "nowrap" }}>₹{it.amount.toLocaleString("en-IN")}</span>
+              <X size={11} color="#c4ccd6" style={{ cursor: "pointer", flexShrink: 0 }} onClick={() => onDelete(it)} />
+            </div>
+          ))}
         </div>
       )}
     </div>
