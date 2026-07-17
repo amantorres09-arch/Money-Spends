@@ -197,14 +197,15 @@ export default function App() {
   };
 
   const logSpend = async () => {
-    const amt = Number(fAmount);
-    if (!activeBucket || !amt) return;
+    const raw = Number(fAmount);
+    if (!activeBucket || !raw) return;
+    const amt = fFlow === "in" ? -raw : raw;
     const today = localToday();
     const spend = { date: today, bucket: activeBucket, description: fDesc.trim(), amount: amt };
     setSpendRows((r) => [...r, [today, spend.bucket, spend.description, String(amt)]]);
     closeCard();
     if (view !== "overall") setView(today.slice(0, 7));
-    showToast("Logged " + money(amt) + " to " + spend.bucket, spend);
+    showToast((fFlow === "in" ? "Added " : "Logged ") + money(raw) + " to " + spend.bucket, spend);
     try { await post({ action: "addSpend", ...spend }); } catch {}
   };
 
@@ -601,3 +602,4 @@ export default function App() {
     </div>
   );
 }
+
